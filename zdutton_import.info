@@ -1,0 +1,4 @@
+name = ZDutton Import
+description = A module to import the old ZDutton site into Drupal.
+core = 7.x
+configure = admin/config/content/zdutton_import

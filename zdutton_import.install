@@ -1,0 +1,190 @@
+<?php
+/**
+ * @file
+ * Installation stuff for zdutton_import.
+ */
+
+/**
+ * Implements hook_enable().
+ * 
+ * Creates the content types, formats, and vocabularies we will need
+ * in this module. I do this at enable rather than at install because
+ * I needed to fiddle with it (by disabling and enabling) and this
+ * seems to work just as well as hook_install().
+ */
+function zdutton_import_enable() {
+	# If the family_group content type doesn't exist, create it.
+	if (! node_type_load('family_group')) { 
+		zdutton_import_node_type_create();
+	}
+	# It ought not to make a difference to create the format again
+	# even it exists.
+	zdutton_import_filter_format_create();
+	# Likewise with the taxonomy vocabulary
+	# (the function already checks whether it exists).
+	zdutton_import_create_taxonomy_vocabulary();
+}
+
+/**
+ * Implements hook_disable().
+ * 
+ * I really shouldn't need to delete the content type or format,
+ * but during development this is helpful so that any changes I
+ * make in the initialization routines will show up.
+ */
+function zdutton_import_disable() {
+	zdutton_import_delete_family_groups();
+	if (node_type_get_type('family_group')) {
+		node_type_delete('family_group');
+	}
+	if ($format = filter_format_load('raw_html')) {
+		filter_format_disable($format);
+	}
+}
+
+/**
+ * Implements hook_uninstall().
+ * 
+ * Removes a couple of variables set by the node types.
+ */
+function zdutton_import_uninstall() {
+	variable_del('node_options_family_group');
+	variable_del('pathauto_node_family_group_pattern');
+}
+
+/**
+ * Creates the content type 'Family group'
+ */
+function zdutton_import_node_type_create() {
+	# Thanks https://api.drupal.org/api/drupal/modules!node!node.module/function/node_type_save/7
+	#        https://www.drupal.org/node/721552
+	
+	$family_group_type = array(
+		'type'        => 'family_group',
+		'name'        => t('Family group page'),
+		'base'        => 'node_content',
+		'description' => t('A page displaying information about a family group.'),
+		'custom'      => 0,
+		'modified'    => 0,
+		'locked'      => 0,
+		'has_title'   => 1,
+		'module'      => 'zdutton_import',
+	);
+	$family_group_type = (object) $family_group_type;
+	node_type_save($family_group_type);
+	node_add_body_field($family_group_type);
+	
+	# Create a field
+	/* Thanks http://www.monarchdigital.com/blog/2013-08-09/programmatically-creating-fields-drupal-7
+	 *        https://www.drupal.org/node/1228878
+	 *        http://drupal.stackexchange.com/questions/8284/programmatically-create-fields-in-drupal-7
+	 *        https://api.drupal.org/api/drupal/modules!field!field.crud.inc/7
+	 *        https://www.drupal.org/node/872194 (create taxonomy reference field programmatically)
+	 *        https://gist.github.com/JustAdam/3235992
+	 */
+	
+	# Set variables
+	#   see table 'variable', also https://www.drupal.org/node/1169864
+	variable_set('node_options_family_group', array('status','revision'));
+	variable_set('pathauto_node_family_group_pattern', 'family/[node:title]');
+			
+	drupal_set_message(t('A ' . l($family_group_type->name,
+		'admin/structure/types/manage/' . $family_group_type->type) .
+		'content type has been created.'));		
+}
+
+/**
+ * Create the field, instance, and vocabulary for the family_groups
+ * taxonomy.
+ */
+function zdutton_import_create_taxonomy_vocabulary() {
+	# Get the vocabulary (or create it)
+	$vocabulary = zdutton_import_taxonomy_get_vocabulary();
+	
+	$field_name = 'field_family_groups';
+	# Does the field exist?
+	$field = field_info_field($field_name);
+		
+	# If the field doesn't exist, create it
+	if (empty($field)) {
+		$field = array(
+			'field_name' => $field_name,
+			'type'       => 'taxonomy_term_reference',
+			'settings'   => array(
+				'allowed_values' => array(
+					array(
+						'vocabulary' => 'family_groups',
+						'parent' => 0,
+					),
+				),
+			),
+		);
+		field_create_field($field);
+	}
+	
+	# Does the instance on the content type exist?
+	$instance = field_info_instance('node', $field_name, 'family_group');
+	if (empty($instance)) {
+		# Create the instance of the field
+		$instance = array(
+			'field_name' => $field_name,
+			'entity_type' => 'node',
+			'label' => t('Family'),
+			'bundle' => 'family_group',
+			'description' => t('The family groups this page belongs to.'),
+			'required' => false,
+			'widget' => array(
+				'type' => 'taxonomy_autocomplete'
+			),		
+		);
+		field_create_instance($instance);	
+	}
+
+}
+
+/**
+ * Create the filter format for 'raw_html' (without automatic HTML line breaks).
+ */
+function zdutton_import_filter_format_create() {
+	/* see https://www.drupal.org/node/825146#comment-8501071
+	 */
+	 
+	$raw_html_format = array(
+		'format' => 'raw_html',
+		'name'   => t('Raw HTML'),
+		'filters' => array(
+			'autop' => array(   # Turn off automatic line breaks
+				'status' => 0,   
+			),
+		),
+	);
+	$raw_html_format = (object) $raw_html_format;
+	filter_format_save($raw_html_format);
+	drupal_set_message(t('A ' . l($raw_html_format->name,
+		'admin/config/content/formats/' . $raw_html_format->format) .
+		'text format has been created.'));
+}
+
+/**
+ * Get the vocabulary object for the 'family_groups' vocabulary, or
+ * if it doesn't exist, create it.
+ */
+function zdutton_import_taxonomy_get_vocabulary() {
+	if ($vocabulary = taxonomy_vocabulary_machine_name_load('family_groups')) {
+		return $vocabulary;
+	}
+	$vocabulary = array(
+		'name'         => t('Family Groups'),
+		'description'  => t('What family groups the page relates to.'),
+		'machine_name' => 'family_groups',
+		'module'       => 'zdutton_import',
+		'hierarchy'    => 0,
+	);
+	$vocabulary = (object) $vocabulary;
+	taxonomy_vocabulary_save($vocabulary);
+	drupal_set_message(t('A ' . l($vocabulary->name,
+		'/admin/structure/taxonomy/' .
+		$vocabulary->machine_name . '/edit') .
+		'taxonomy vocabulary has been created.'));
+	return $vocabulary;
+}

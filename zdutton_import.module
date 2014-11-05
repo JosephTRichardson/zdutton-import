@@ -1,0 +1,715 @@
+<?php
+/**
+ * @file
+ * A module to import the old ZDutton site into Drupal.
+ */
+       
+/**
+ * Implements hook_menu().
+ */
+function zdutton_import_menu() {
+    $items = array();
+    $items['admin/config/content/zdutton_import'] = array(
+        'title' => t('ZDutton Import'),
+        'description' => t('Control panel for ZDutton Import'),
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('zdutton_import_form'),
+        'access arguments' => array('access administration pages'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+    return $items;
+}
+
+/**
+ * Page callback: ZDutton Import settings
+ *
+ * @see zdutton_import_menu()
+ */
+function zdutton_import_form($form, &$form_state) {
+    $form['description'] = array(
+        '#type' => 'item',
+        '#description' => t('All you do is push the button.'),
+    );
+    $form['actions']['#type'] = 'actions';
+    $form['actions']['submit'] = array(
+        '#type' => 'submit',
+        '#value' => t('Begin import'),
+    );
+    $form['#submit'][] = 'zdutton_import_begin_import';
+    
+    return $form;
+}
+
+/**
+ * Begin the import process.
+ * 
+ * @see zdutton_import_form()
+ */
+function zdutton_import_begin_import() {
+    /* Delete the old nodes (i.e. start over clean)
+     * Should make this an option whether to delete old nodes.
+     * The deletion will only be a development thing anyway --
+     * after we are in production, will want nodes to remain and
+     * track revisions.
+     */
+    zdutton_import_delete_family_group_pages();
+    
+    # Do the import
+    zdutton_import_do_import();
+    
+    drupal_set_message("Import complete.");
+}
+
+/**
+ * Implements hook_node_view().
+ * 
+ * We use this to raise breadcrumbs for family_group and image_gallery
+ * nodes, according to context, and based on the taxonomy hierarchy.
+ */
+function zdutton_import_node_view($node, $view_mode, $langcode) {
+    
+    if (($node->type == 'family_group' || $node->type == 'image_gallery')
+      && $view_mode == 'full') {
+        $breadcrumbs = array();
+        $breadcrumbs[] = l(t('Home'), '<front>');
+        
+        /* May put context-dependent top-level pages here for
+         * family data (/family/) and photo galleries (/photo/).
+         */
+        
+        /* The taxonomy term name should always be the same name as
+         * the titles for the family_group and image_gallery nodes.
+         * This keeps all the families linked together and to the
+         * hierarchy.
+         */ 
+        $terms = taxonomy_get_term_by_name($node->title, 'family_groups');
+        list($tid, $term) = each($terms);
+        if ($tid) {
+            $ancestors = taxonomy_get_parents_all($tid);
+            $this_node = array_shift($ancestors);
+            $ancestors = array_reverse($ancestors);
+            while ($parent = array_shift($ancestors)) {
+                $slug = zdutton_import_name_to_slug($parent->name);
+                $breadcrumbs[] = l($parent->name, 'family/' . $slug);
+            }
+            $breadcrumbs[] = $this_node->name; # Not a link
+            drupal_set_breadcrumb($breadcrumbs);
+        } else {
+            drupal_set_message("Failed to retrieve taxonomy term " .
+                $node->title . "'.", 'error');
+        }
+    }
+    
+}
+
+/**
+ * Implements hook_node_info().
+ * 
+ * Returns info about the node types this module supports
+ * (right now, I don't know that it does a lot of good).
+ */
+function zdutton_import_node_info() {
+    $node_info = array(
+        'family_group' => array(
+            'name'        => 'family_group',
+            'base'        => 'node_content',
+            'description' => t('A page displaying information about a family group.'),
+            'has_title'   => true,
+        ),
+    );
+    return $node_info;
+}
+
+/**
+ * Delete all existing family_group pages.
+ * 
+ * This was mainly just for development purposes and will probably
+ * be removed. Even if we regenerate nodes from sources after the 
+ * initial import, we will want to track revisions and not wipe out
+ * whole nodes.
+ */
+function zdutton_import_delete_family_group_pages() {
+    /* This method of deletion works well because it also deletes any
+     * url_aliases or anything else attached to the node in the database.
+     */
+    $result = db_query("SELECT nid FROM {node} WHERE type = 'family_group'");
+    $num_deleted = 0;
+    foreach ($result as $record) {
+        node_delete($record->nid);
+        $num_deleted++;
+    }
+    drupal_set_message("Deleted $num_deleted nodes.");
+}
+
+/**
+ * Create a new family_group node from the data pulled from the
+ * original source files.
+ * 
+ * @param $data  A reference to the compiled data from a particular source file.
+ */
+function zdutton_import_create_node(&$data) {
+    // Thanks to https://www.drupal.org/node/1388922
+    global $user;
+    
+    $values = array(
+      'type' => 'family_group',
+      'uid' => $user->uid,
+      'status' => 1,
+      'comment' => 1,
+      'promote' => 0,
+    );
+    $entity = entity_create('node', $values);
+    $wrapper = entity_metadata_wrapper('node', $entity);
+
+    $wrapper->title->set($data['TITLE']);
+    $body_content = $data['content'];
+    $wrapper->body->set(array(
+        'value' => $body_content,
+        'format' => 'raw_html'  # Created in .install
+    ));
+    
+    /* Adding taxonomy term to entity wrapper:
+     *     https://www.drupal.org/documentation/entity-metadata-wrappers
+     */
+    
+    # Get or create a taxonomy term ID
+    $tid = zdutton_import_get_taxonomy_term_id($data['TITLE']);
+    $wrapper->field_family_groups->set($tid);
+    
+    $wrapper->save();
+    
+    # Store the nid of the saved entity. We might use it later.
+    $data['nid'] = $entity->nid;
+}
+
+/**
+ * Retrieve the family_groups taxonomy term for the requested name,
+ * or if it doesn't exist, create it. Returns the tid.
+ * 
+ * @param $name  The family name (title) to retrieve.
+ */
+function zdutton_import_get_taxonomy_term_id($term_name) {
+    /* Thanks:
+     * http://drupal.stackexchange.com/questions/76319/how-to-set-a-taxonomy-term-programatically-for-a-node */
+    $vocabulary_name = 'family_groups';
+    $arr_terms = taxonomy_get_term_by_name($term_name, $vocabulary_name);
+    
+    if (! empty($arr_terms)) {
+        # Retrieve the existing term and return the tid.
+        $arr_terms = array_values($arr_terms);
+        $tid = $arr_terms[0]->tid;
+    }
+    else {
+        # Create a new term and return the tid.
+        # This vocabulary should have been created
+        # when module was enabled.
+        $vocabulary = taxonomy_vocabulary_machine_name_load($vocabulary_name);
+        $term = array(
+            'name' => $term_name,
+            'vid'  => $vocabulary->vid,
+        );
+        $term = (object) $term;
+        taxonomy_term_save($term);
+        $tid = $term->tid;
+    }
+    return $tid;
+}
+
+/**
+ * The sequence of functions encompassing the actual import of the old
+ * source files: cataloguing, transforming links, etc. This is
+ * everything that needs to work directly on the source data.
+ */
+function zdutton_import_do_import() {
+    global $zdutton_catalog;
+    $input_dir = $GLOBALS['_SERVER']['DOCUMENT_ROOT'] . '/' .
+        drupal_get_path('module', 'zdutton_import') . '/zdutton/raw/data';
+
+    $listing = zdutton_import_get_listing($input_dir);
+    sort($listing);
+    if (! $listing) {
+        drupal_set_message(t("Failed to get listing of ZDutton data files."),
+            'error');
+        return;
+    }
+    drupal_set_message("Got listing. " . count($listing) . " members.");
+    
+    $catalog= zdutton_import_catalog($listing, $input_dir);
+    if (! $catalog) {
+        drupal_set_message(t("Failed to read and catalog ZDutton data files."),
+            'error');
+        return;
+    }
+    drupal_set_message(t("Catalogued files. " . count($catalog) . " entries."),
+        'status');
+    
+    $zdutton_catalog = $catalog;
+    $files_transformed = zdutton_import_transform($catalog);
+    drupal_set_message(t("Processed $files_transformed files."));
+    
+    # Might be able to combine these steps.
+    zdutton_import_make_breadcrumbs($catalog);
+    zdutton_import_make_taxonomy_tree($catalog);
+    drupal_set_message(t("Assembled taxonomy tree."));
+
+    zdutton_import_redirect_list($catalog);
+    drupal_set_message(t("Wrote redirect list."));
+}
+
+/**
+ * Get a listing of the source files.
+ * 
+ * @param $input_dir  The path to the source family data files.
+ */
+function zdutton_import_get_listing($input_dir) {
+    $listing = array();
+    $dh = opendir($input_dir);
+    if (! $dh) {
+        drupal_set_message(t("Failed to open directory $input_dir."), 'error');
+        return false;
+    }
+    while (false !== ($entry = readdir($dh))) {
+        if (! is_dir($entry) && substr($entry, -5) == ".html") {
+            $listing[] = $entry;
+        }
+    }
+    closedir($dh);
+    return $listing;
+}
+
+/**
+ * Initialize the catalog. Read each source file, convert its name
+ * to a slug (which will become its new filename), and store the
+ * source data in the catalog.
+ * 
+ * @param $listing   The file listing retrieved by zdutton_import_get_listing().
+ * @param $input_dir The path to the source family data files. 
+ */
+function zdutton_import_catalog(&$listing, $input_dir) {
+    $catalog = array();
+    foreach ($listing as $file) {
+        if ($file === 'index.html') {
+            # We don't need this one
+            continue;
+        }
+        $data = zdutton_import_read_zfile($file, $input_dir);
+        $title = $data['TITLE'];
+        if (! $title) {
+            drupal_set_message(t("$file has no TITLE attribute"), 'warning');
+            continue;
+        }
+        $slug = zdutton_import_name_to_slug($title);
+        $data['slug'] = $slug;
+        $data['file'] = $file;
+        $catalog[$file] = $data;
+    }
+    return $catalog;
+}
+
+/**
+ * Transform the source code: transform old links to new ones,
+ * and do any other modifications we need. Create the new nodes.
+ * 
+ * @param $catalog  A reference to the catalog containing all source data.
+ */
+function zdutton_import_transform(&$catalog) {
+    $files_done = 0;
+    foreach ($catalog as $file => &$data) {
+        $slug = $data['slug'];
+        $content = &$data['content'];
+        
+        # Run the transformations
+        zdutton_import_transform_links($content);
+        
+        # Create the new node
+        zdutton_import_create_node($data);
+        
+        $files_done++;
+        // Can break here for debugging purposes to run only one file.
+        # break;
+    }
+    return $files_done;
+}
+
+/**
+ * Transform family data links: Each family data page receives a slug
+ * and each link between them is changed to that slug.
+ * 
+ * @param $content  The content of the source files.
+ */
+function zdutton_import_transform_links(&$content) {
+    $content = preg_replace_callback(
+		'/(<a[^>]* href=")([^"]+)("[^>]*>.*?<\/a>)/',
+        function ($matches) {
+            global $zdutton_catalog;
+            $prehref = $matches[1];    # <a href="
+            $href = $matches[2];       # url.html
+            $posthref = $matches[3];   # ">Text</a>
+            
+            $url_components = parse_url($href);
+            # scheme, host, port, user, pass, path, query, fragment
+
+            if (! isset($url_components['path'])) {
+                return $matches[0]; # No change to the link
+            }
+            if (isset($url_components['host'])) {
+                if ($url_components['host'] != 'www.zdutton.org') {
+                    # An external URL; leave it alone.
+                    # drupal_set_message('Found external URL: ' . $href);
+                } else {
+                    drupal_set_message(t('Found absolute internal URL: ' .
+                        $href), 'warning');
+                }
+                return $matches[0]; # No change to the link
+            }
+            
+            /* If it's not just a plain HTML file in this directory
+             * (i.e. a family data file), see if it's something else
+             * we recognize to transform.
+             */
+            if (! preg_match('/^\w+\.html$/', $url_components['path'])) {
+                if ($new_href = zdutton_import_transform_misc_url($href)) {
+                    return $prehref . $new_href . $posthref;
+                }
+                drupal_set_message(t("Unrecognized URL: " . $href), 'warning');
+                return $matches[0];
+            }
+            
+            /* Otherwise it seems to be the family data file we were
+             * looking for.
+             */
+            $file = $url_components['path'];
+            if (! array_key_exists($file, $zdutton_catalog)) {
+				# This shouldn't happen.
+                drupal_set_message(t("Link to unknown family data file: $file"),
+					'warning');
+                return $matches[0];
+            }
+            # Look up the slug of the file to link to.
+            $slug = $zdutton_catalog[$file]['slug'];
+            $new_href = $slug;
+            if (isset($url_components['fragment'])) {
+                $new_href .= '#' . $url_components['fragment'];
+            }
+            return $prehref . $new_href . $posthref;
+        },
+        $content);
+}
+
+/**
+ * Try to transform other stray links we may recognize.
+ * These are mostly to the old photo galleries and cemetery slideshows.
+ * 
+ * @param $href  The link to try to transform.
+ */
+function zdutton_import_transform_misc_url($href) {
+    /* Once we read the map file and the $urlmap is initialized, the
+     * data will remain static. */
+    static $urlmap;
+    if (! isset($urlmap)) {
+        $urlmap = zdutton_import_read_urlmap();
+    }
+    
+    # Chop off the leading '..' if it is there
+    if (substr($href, 0, 2) == '..') {
+        $href = substr($href, 2);
+    }
+    if (isset($urlmap[$href])) { # Then we have a new URL mapped
+        return $urlmap[$href];
+    }
+}
+
+/**
+ * Read the urlmap, a text file with old URLs mapped to new URLs,
+ * separated by whitespace.
+ */
+function zdutton_import_read_urlmap() {
+    $urlmap_file = $GLOBALS['_SERVER']['DOCUMENT_ROOT'] . '/' .
+        drupal_get_path('module', 'zdutton_import') .
+		'/zdutton_import_urls.map';
+    $lines = file($urlmap_file); # Ought to be in this directory
+    $urlmap = array();
+    foreach ($lines as $line) {
+        list($old, $new) = preg_split('/\s+/', $line);
+        $urlmap[$old] = $new;
+    }
+    return $urlmap;
+}
+
+/**
+ * Read the weight map, a text file with family slugs mapped to
+ * weights, used to order the terms in the family_groups taxonomy.
+ * 
+ * @param $catalog  This actually needs to be a new catalog indexed by slug.
+ * @see zdutton_import_make_taxonomy_tree()
+ */
+function zdutton_import_read_weight_map(&$catalog) {
+    $weight_map = $GLOBALS['_SERVER']['DOCUMENT_ROOT'] . '/' .
+        drupal_get_path('module', 'zdutton_import') .
+        '/zdutton_import_weight.map';
+    $lines = file($weight_map);
+    
+    foreach ($lines as $line) {
+        list($slug, $weight) = explode('=', $line);
+        $catalog[$slug]['weight'] = $weight;
+    }
+}
+
+/**
+ * Basic utility function: transform the family name into a slug.
+ * E.g. "Edmond Dutton and Margaret Barnett Ross" =>
+ *      "edmond-dutton-and-margaret-barnett-ross"
+ * 
+ * @param $title  The family name to transform.
+ */
+function zdutton_import_name_to_slug($title) {
+    $title = strtolower($title);
+    $title = str_replace(' ', '-', $title);
+    # Anything not [a-z0-9_-] (And there ought not to be any _ either)
+    $title = preg_replace('/[^\w-]/', '', $title); 
+    return $title;
+}
+
+/**
+ * Read the old ZDutton source file ("zfile"): an HTML file sans its
+ * header and footer, and headed by metadata that were processed by
+ * a Perl preprocessor to "bake" the live HTML files before every
+ * upload. Headers are in the format "TITLE=Zachariah Dutton" and
+ * header section ended with "__DATA__" line.
+ * This will read the metadata and store it, then concatenate the
+ * rest of the source and return it.
+ * 
+ * @param $zfile      The source file.
+ * @param $input_dir  The path to the source files.
+ */
+function zdutton_import_read_zfile($zfile, $input_dir) {
+    # Read the whole file into an array
+    $lines = file($input_dir . '/' . $zfile);
+        
+    # Data include TITLE, UP_TITLE, UP_HREF, etc.
+    # This will help us establish parental/hierarchical
+    #   relationships between the pages.
+    $data = array();
+    $i = 0;
+    while ($line = array_shift($lines)) {
+        $line = rtrim($line);
+        if ($line == '__DATA__') {
+            break;
+        } else if (list($field, $value) = explode('=', $line)) {
+            $data[$field] = $value;
+        }
+        $i++;
+    }
+    # Pack the rest of the lines away as content
+    $content = implode($lines);
+    $data['content'] = $content;
+    return $data;
+}
+
+/**
+ * Assemble a list of Redirect rules (old URLs => new URLs)
+ * and insert them into Drupal's .htaccess. Writing the .htaccess
+ * works on my local server (where the Apache user has group write
+ * access to .htaccess). But we may need to temporarily change the
+ * file permissions on the remote server for this to work.
+ * Currently this only writes Redirect rules for the family data
+ * files but will also write rules for image galleries, image files,
+ * and any other stray URLs we can avoid breaking.
+ * 
+ * @param $catalog  Ye catalog of olde data.
+ */
+function zdutton_import_redirect_list($catalog) {
+    $rules = array();
+    foreach ($catalog as $file => $data) {
+        $slug = $data['slug'];
+        $rewrite_rule = sprintf("Redirect 301  %-30s  %s\n",
+			"/data/$file", "/family/$slug");
+        $rules[] = $rewrite_rule;
+    }
+    $rules_string = "# Begin zdutton_import Redirect rules." .
+        implode($rules) . "# End zdutton_import Redirect rules.\n\n";
+    
+    # Attempt to edit the .htaccess file.
+    try {
+        # Read the whole file into an array
+        $htaccess_path = $GLOBALS['_SERVER']['DOCUMENT_ROOT'] .
+			'/.htaccess';
+        $content = file_get_contents($htaccess_path);
+        
+        if (! $content) {
+            throw new Exception("Failed to read .htaccess");
+        }
+        drupal_set_message(t("Read .htaccess: " . strlen($content) .
+			" bytes."));
+        
+        if (preg_match('/# Begin zdutton_import Redirect rules/',
+		  $content)) {
+            # Then we've edited it before; replace our previous work.
+            $content = preg_replace('/# Begin zdutton_import Redirect '
+				. 'rules.*# End zdutton_import Redirect rules./',
+				$rules_string, $content);
+        } else { # Then we're inserting something new.
+            # If the .htaccess file changes we need to edit this to
+            # give another context cue for where to put the list.
+            $content = preg_replace('/(# Various rewrite rules\.)/',
+				"$rules_string$1", $content);
+        }
+        
+        $bytes_written = file_put_contents($htaccess_path, $content);
+        if ($bytes_written) {
+            drupal_set_message(t("Wrote $bytes_written bytes to .htaccess."));
+        } else {
+            throw new Exception(t("Failed to write to .htaccess."));
+        }
+    } catch (Exception $e) {
+        drupal_set_message(t("Editing .htaccess failed: " .
+			$e->getMessage()), 'error');
+    }
+}
+
+/**
+ * Assemble the proper breadcrumbs for the family data files, based
+ * on the old UP_TITLE and UP_HREF headers. (Old pages had a hierarchy
+ * with 'Up' links.)
+ * 
+ * @param $catalog  The long-suffering catalog.
+ */
+function zdutton_import_make_breadcrumbs(&$catalog) {
+    foreach ($catalog as $file => &$data) {
+        $node = $data;
+        $breadcrumbs = array();
+        
+        # Insert the breadcrumb of this file with no link.
+        $breadcrumbs[] = [$data['TITLE'], null];
+        $next_up_node = $node;
+        
+        # Assemble the rest of the breadcrumbs for this file.
+        do {
+            # Get 'data' for the UP_HREF of the current node.
+            if (isset($catalog[$next_up_node['UP_HREF']])) {
+                $next_up_node = $catalog[$next_up_node['UP_HREF']];
+                $breadcrumb = [$next_up_node['TITLE'],
+					$next_up_node['slug']];
+                $breadcrumbs[] = $breadcrumb;
+            } else {
+                # Then we're at the top (probably "../index.html",
+                # which doesn't have a node). Will break the loop.
+                $next_up_node = null;
+            }
+            if (count($breadcrumbs) >= 10) {
+                # A precaution
+                drupal_set_message(t("Something wrong in breadcrumbs: " .
+					"appears to be endless recursion in file "
+                    . $next_up_node['file'] . "."), 'error');
+            }
+        } while ($next_up_node);
+        
+        # This should copy the array.
+        $data['breadcrumbs'] = $breadcrumbs;
+         
+        # Was originally going to prepend breadcrumbs into HTML of node,
+        # but then discovered how to manipulate the Drupal breadcrumbs
+        # and no longer need this.
+        $make_html_breadcrumbs = false;
+        if ($make_html_breadcrumbs) {
+            # Now HTMLize them
+
+            $html_breadcrumbs = '<nav class="breadcrumbs"><ul>' . "\n";
+            while ($breadcrumb = array_pop($breadcrumbs)) {
+                $breadcrumb_level = count($breadcrumbs); # 0 = the bottom
+                $breadcrumb_class = "breadcrumb breadcrumb" .
+					$breadcrumb_level;
+                $breadcrumb_href = $breadcrumb[1];
+                $breadcrumb_title = $breadcrumb[0];
+                
+                $breadcrumb_html = '<li class="' . $breadcrumb_class .
+						'">' .
+                    ($breadcrumb_href ? '<a href="' . $breadcrumb_href .
+						'">' .
+                    $breadcrumb_title . '</a>' : $breadcrumb_title)
+						. '</li>' . "\n";
+                $html_breadcrumbs .= $breadcrumb_html;
+            }
+            $html_breadcrumbs .= '</ul></nav>' . "\n\n";
+            $data['breadcrumbs_html'] = $html_breadcrumbs;
+        }
+    }
+}
+
+/**
+ * Using the breadcrumbs we assembled before in
+ * zdutton_import_make_breadcrumbs(), construct the family_groups
+ * taxonomy into a hierarchical tree. This turns out to be quite
+ * useful as a backbone: I can treat both the family_group pages
+ * and the image_gallery pages as hierarchical, since they are
+ * bound to the taxonomy, even though they have no actual hierarchy 
+ * as Drupal defines it. (I.e. No node references, only taxonomy
+ * term references: The hierarchy is maintained in the taxonomy.)
+ * 
+ * @param $catalog  One last hurrah for the catalog.
+ */
+function zdutton_import_make_taxonomy_tree(&$catalog) {
+    # Old filenames are no longer useful; need the slugs this time.
+    # Re-key the catalog into a new array.
+    $scatalog = array();
+    
+    foreach ($catalog as $file => &$data) {
+        $slug = $data['slug'];
+        $scatalog[$slug] = $data;
+    }
+        
+    # Now assemble the taxonomy tree.
+    $vocabulary_name = 'family_groups';
+
+    # This is to get the weight of each term.
+    zdutton_import_read_weight_map($scatalog);
+    
+    foreach ($scatalog as $slug => &$data) {
+        # Retrieve the old breadcrumbs.
+        $breadcrumbs = $data['breadcrumbs'];
+        
+        # Term has already been created when the nodes were created.
+        # Retrieve it.
+        $name = $data['TITLE'];
+        $terms = taxonomy_get_term_by_name($name, $vocabulary_name);
+        if (! empty($terms)) {
+            # The array comes back as tid => term_object,
+            # but we just need the value here (term_object).
+            $terms = array_values($terms);
+            $term = $terms[0];
+            # The weight of the term for this page
+            $term->weight = $data['weight'];
+        } else {
+            drupal_set_message(t("zdutton_import_make_taxonomy_tree(): " .
+				"Failed to retrieve taxonomy term '$name'"), 'error');
+            continue;
+        }
+        
+        # The first breadcrumb without a link.
+        $this_node = array_shift($breadcrumbs);
+        if (! $breadcrumbs) { # At the top of the tree
+			# Zachariah Dutton has weight 0 so there's nothing to save.
+            continue;
+        }
+        # Breadcrumbs were [title, slug]
+        $parent_slug = $breadcrumbs[0][1]; # and we want the slug
+        if (! empty($parent_slug)) { # It ought not to be empty.
+            $parent = $scatalog[$parent_slug];
+            
+            # Now get the taxonomy term named after the parent.
+            $parent_name = $parent['TITLE'];
+            $terms = taxonomy_get_term_by_name($parent_name,
+				$vocabulary_name);
+            if (empty($terms)) {
+                drupal_set_message(t("zdutton_import_make_taxonomy_tree():" .
+					" Failed to retrieve taxonomy term '$parent_name'"),
+					'error');
+                continue;
+            }
+
+            list($parent_tid, $parent_term) = each($terms);
+            $term->parent = $parent_tid;
+            taxonomy_term_save($term);
+        }
+    }
+}
