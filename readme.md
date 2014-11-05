@@ -4,7 +4,7 @@ A Drupal 7 module to import and update my old genealogy website.
 ## Overview
 
 This project is a Drupal 7 module designed to import my old genealogy
-website, the [Zachariah Dutton Genealogy Web](http://wwww.zdutton.org)
+website, the [Zachariah Dutton Genealogy Web](http://www.zdutton.org)
 or ZDutton.org, into a Drupal environment. The old ZDutton.org exists
 in a hundred or so "raw HTML" files — that is, HTML files stripped of
 their headers and footers, to which I formerly applied a basic, offline
