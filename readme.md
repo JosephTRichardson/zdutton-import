@@ -94,9 +94,9 @@ This project and code, like [Drupal](https://www.drupal.org/licensing/faq)
 itself, are released under the GNU
 [General Public License, version 2 or later](http://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
 This means that you are free to copy, modify, and redistribute it, or
-incorporate all of part into your own project, provided that you keep
+incorporate all or part into your own project, provided that you keep
 intact the attribution to me and this license information, and that in
 the case of any derivative works, you likewise make the source code
 free and available under these same terms.
 
-Copyright 2014, Joseph T. Richardson (LonelyPilgrim @ GitHub).
+Copyright 2014, [Joseph T. Richardson](mailto:joseph.t.richardson@gmail.com) (LonelyPilgrim @ GitHub).
