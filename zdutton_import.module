@@ -90,7 +90,14 @@ function zdutton_import_node_view($node, $view_mode, $langcode) {
             $ancestors = array_reverse($ancestors);
             while ($parent = array_shift($ancestors)) {
                 $slug = zdutton_import_name_to_slug($parent->name);
-                $breadcrumbs[] = l($parent->name, 'family/' . $slug);
+                if ($node->type == 'image_gallery') {
+                    # Check to see if a 'photo/$slug' path exists
+                    # (i.e., a photo gallery for the parent family)
+                    # Otherwise link to the parent taxonomy.
+                    $breadcrumbs[] = l($parent->name, 'family-groups/' . $slug);
+                } else { // 'family_group'
+                    $breadcrumbs[] = l($parent->name, 'family/' . $slug);
+                }
             }
             $breadcrumbs[] = $this_node->name; # Not a link
             drupal_set_breadcrumb($breadcrumbs);
@@ -108,17 +115,17 @@ function zdutton_import_node_view($node, $view_mode, $langcode) {
  * Returns info about the node types this module supports
  * (right now, I don't know that it does a lot of good).
  */
-function zdutton_import_node_info() {
+/* function zdutton_import_node_info() {
     $node_info = array(
         'family_group' => array(
-            'name'        => 'family_group',
+            'name'        => t('Family group page'),
             'base'        => 'node_content',
             'description' => t('A page displaying information about a family group.'),
             'has_title'   => true,
         ),
     );
     return $node_info;
-}
+} */
 
 /**
  * Delete all existing family_group pages.
@@ -174,7 +181,7 @@ function zdutton_import_create_node(&$data) {
     
     # Get or create a taxonomy term ID
     $tid = zdutton_import_get_taxonomy_term_id($data['TITLE']);
-    $wrapper->field_family_groups->set($tid);
+    $wrapper->field_family_groups->set(array($tid));
     
     $wrapper->save();
     
@@ -339,7 +346,7 @@ function zdutton_import_transform(&$catalog) {
  */
 function zdutton_import_transform_links(&$content) {
     $content = preg_replace_callback(
-		'/(<a[^>]* href=")([^"]+)("[^>]*>.*?<\/a>)/',
+        '/(<a[^>]* href=")([^"]+)("[^>]*>.*?<\/a>)/',
         function ($matches) {
             global $zdutton_catalog;
             $prehref = $matches[1];    # <a href="
@@ -380,9 +387,9 @@ function zdutton_import_transform_links(&$content) {
              */
             $file = $url_components['path'];
             if (! array_key_exists($file, $zdutton_catalog)) {
-				# This shouldn't happen.
+                # This shouldn't happen.
                 drupal_set_message(t("Link to unknown family data file: $file"),
-					'warning');
+                    'warning');
                 return $matches[0];
             }
             # Look up the slug of the file to link to.
@@ -426,7 +433,7 @@ function zdutton_import_transform_misc_url($href) {
 function zdutton_import_read_urlmap() {
     $urlmap_file = $GLOBALS['_SERVER']['DOCUMENT_ROOT'] . '/' .
         drupal_get_path('module', 'zdutton_import') .
-		'/zdutton_import_urls.map';
+        '/zdutton_import_urls.map';
     $lines = file($urlmap_file); # Ought to be in this directory
     $urlmap = array();
     foreach ($lines as $line) {
@@ -523,7 +530,7 @@ function zdutton_import_redirect_list($catalog) {
     foreach ($catalog as $file => $data) {
         $slug = $data['slug'];
         $rewrite_rule = sprintf("Redirect 301  %-30s  %s\n",
-			"/data/$file", "/family/$slug");
+            "/data/$file", "/family/$slug");
         $rules[] = $rewrite_rule;
     }
     $rules_string = "# Begin zdutton_import Redirect rules." .
@@ -533,26 +540,26 @@ function zdutton_import_redirect_list($catalog) {
     try {
         # Read the whole file into an array
         $htaccess_path = $GLOBALS['_SERVER']['DOCUMENT_ROOT'] .
-			'/.htaccess';
+            '/.htaccess';
         $content = file_get_contents($htaccess_path);
         
         if (! $content) {
             throw new Exception("Failed to read .htaccess");
         }
         drupal_set_message(t("Read .htaccess: " . strlen($content) .
-			" bytes."));
+            " bytes."));
         
         if (preg_match('/# Begin zdutton_import Redirect rules/',
-		  $content)) {
+          $content)) {
             # Then we've edited it before; replace our previous work.
             $content = preg_replace('/# Begin zdutton_import Redirect '
-				. 'rules.*# End zdutton_import Redirect rules./',
-				$rules_string, $content);
+                . 'rules.*# End zdutton_import Redirect rules./',
+                $rules_string, $content);
         } else { # Then we're inserting something new.
             # If the .htaccess file changes we need to edit this to
             # give another context cue for where to put the list.
             $content = preg_replace('/(# Various rewrite rules\.)/',
-				"$rules_string$1", $content);
+                "$rules_string$1", $content);
         }
         
         $bytes_written = file_put_contents($htaccess_path, $content);
@@ -563,7 +570,7 @@ function zdutton_import_redirect_list($catalog) {
         }
     } catch (Exception $e) {
         drupal_set_message(t("Editing .htaccess failed: " .
-			$e->getMessage()), 'error');
+            $e->getMessage()), 'error');
     }
 }
 
@@ -589,7 +596,7 @@ function zdutton_import_make_breadcrumbs(&$catalog) {
             if (isset($catalog[$next_up_node['UP_HREF']])) {
                 $next_up_node = $catalog[$next_up_node['UP_HREF']];
                 $breadcrumb = [$next_up_node['TITLE'],
-					$next_up_node['slug']];
+                    $next_up_node['slug']];
                 $breadcrumbs[] = $breadcrumb;
             } else {
                 # Then we're at the top (probably "../index.html",
@@ -599,7 +606,7 @@ function zdutton_import_make_breadcrumbs(&$catalog) {
             if (count($breadcrumbs) >= 10) {
                 # A precaution
                 drupal_set_message(t("Something wrong in breadcrumbs: " .
-					"appears to be endless recursion in file "
+                    "appears to be endless recursion in file "
                     . $next_up_node['file'] . "."), 'error');
             }
         } while ($next_up_node);
@@ -618,16 +625,16 @@ function zdutton_import_make_breadcrumbs(&$catalog) {
             while ($breadcrumb = array_pop($breadcrumbs)) {
                 $breadcrumb_level = count($breadcrumbs); # 0 = the bottom
                 $breadcrumb_class = "breadcrumb breadcrumb" .
-					$breadcrumb_level;
+                    $breadcrumb_level;
                 $breadcrumb_href = $breadcrumb[1];
                 $breadcrumb_title = $breadcrumb[0];
                 
                 $breadcrumb_html = '<li class="' . $breadcrumb_class .
-						'">' .
+                        '">' .
                     ($breadcrumb_href ? '<a href="' . $breadcrumb_href .
-						'">' .
+                        '">' .
                     $breadcrumb_title . '</a>' : $breadcrumb_title)
-						. '</li>' . "\n";
+                        . '</li>' . "\n";
                 $html_breadcrumbs .= $breadcrumb_html;
             }
             $html_breadcrumbs .= '</ul></nav>' . "\n\n";
@@ -681,14 +688,14 @@ function zdutton_import_make_taxonomy_tree(&$catalog) {
             $term->weight = $data['weight'];
         } else {
             drupal_set_message(t("zdutton_import_make_taxonomy_tree(): " .
-				"Failed to retrieve taxonomy term '$name'"), 'error');
+                "Failed to retrieve taxonomy term '$name'"), 'error');
             continue;
         }
         
         # The first breadcrumb without a link.
         $this_node = array_shift($breadcrumbs);
         if (! $breadcrumbs) { # At the top of the tree
-			# Zachariah Dutton has weight 0 so there's nothing to save.
+            # Zachariah Dutton has weight 0 so there's nothing to save.
             continue;
         }
         # Breadcrumbs were [title, slug]
@@ -699,11 +706,11 @@ function zdutton_import_make_taxonomy_tree(&$catalog) {
             # Now get the taxonomy term named after the parent.
             $parent_name = $parent['TITLE'];
             $terms = taxonomy_get_term_by_name($parent_name,
-				$vocabulary_name);
+                $vocabulary_name);
             if (empty($terms)) {
                 drupal_set_message(t("zdutton_import_make_taxonomy_tree():" .
-					" Failed to retrieve taxonomy term '$parent_name'"),
-					'error');
+                    " Failed to retrieve taxonomy term '$parent_name'"),
+                    'error');
                 continue;
             }
 
