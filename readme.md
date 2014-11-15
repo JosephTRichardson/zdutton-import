@@ -63,8 +63,8 @@ It wasn't bad, for 1999. I was an avid early adopter of Web standards,
 followed the W3C's recommendations religiously, and turned my nose at
 all the lamers who used &lt;FONT&gt; tags and other presentational elements
 in their HTML. I hand-coded a site full of valid HTML 4.01 and CSS1 that
-communicated all the data I needed to communicate, and I'm still proud
-of that.
+semantically communicated all the data I needed to communicate, and I'm
+still proud of that.
 
 Though on the surface bare and spartan, behind the scenes, I was doing
 some cool things. I realized the necessity of tracking my updates to
